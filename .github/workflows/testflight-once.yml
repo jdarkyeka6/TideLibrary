@@ -13,7 +13,7 @@ concurrency:
   group: tidelibrary-testflight
   cancel-in-progress: false
 
-# Trigger 2: Photos, People and Search TestFlight build.
+# Trigger 3: debounced layered search TestFlight build.
 jobs:
   build:
     runs-on: macos-15
