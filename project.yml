@@ -1,0 +1,39 @@
+name: TideLibrary
+options:
+  bundleIdPrefix: com.jdarkyeka6
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    CODE_SIGN_STYLE: Automatic
+    TARGETED_DEVICE_FAMILY: "1"
+    VERSIONING_SYSTEM: apple-generic
+    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "0.1"
+targets:
+  TideLibrary:
+    type: application
+    platform: iOS
+    sources:
+      - path: TideLibrary
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jdarkyeka6.TideLibrary
+        INFOPLIST_FILE: TideLibrary/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        PRODUCT_NAME: TideLibrary
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+schemes:
+  TideLibrary:
+    build:
+      targets:
+        TideLibrary: all
+    run:
+      config: Debug
+    archive:
+      config: Release
