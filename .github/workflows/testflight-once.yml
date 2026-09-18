@@ -13,7 +13,7 @@ concurrency:
   group: tidelibrary-testflight
   cancel-in-progress: false
 
-# Trigger 1: first TideLibrary TestFlight build.
+# Trigger 2: Photos, People and Search TestFlight build.
 jobs:
   build:
     runs-on: macos-15
