@@ -21,6 +21,9 @@ jobs:
       - name: Generate TideLibrary app icon
         run: python3 ios-ci/generate_app_icon.py
 
+      - name: Fetch FaceNet model
+        run: bash ios-ci/fetch_facenet_model.sh
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
