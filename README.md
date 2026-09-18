@@ -1,20 +1,23 @@
 # TideLibrary
 
-TideLibrary is a native iPhone photo and video library for browsing media across multiple sources without duplicating an entire cloud library onto the phone.
+TideLibrary is a native iPhone photo and video viewer built around Apple Photos and iCloud Photos.
 
-## Current sources
+## Current focus
 
-- Apple Photos + iCloud Photos through PhotoKit
-- Linked cloud folders through the iOS Files provider, including Google Drive when Google Drive is available in Files
+TideLibrary is intentionally simple for now:
 
-## Core behaviour
+- **Photos** — a fast month-by-month Apple Photos timeline
+- **People** — on-device recurring-face grouping
+- **Search** — dates, media types, favourites, screenshots, Vision image labels and text found inside photos
+- Full-screen swipe viewing, pinch zoom and video playback
 
-- PhotoKit asset references instead of bulk photo imports
-- Lazy thumbnails and on-demand full-screen media
-- Swipe gallery with pinch zoom and video playback
-- Albums and search
-- Source management
-- No "Import All" storage bomb
+## Privacy and storage
+
+- Photos are referenced through PhotoKit instead of bulk-imported
+- TideLibrary does not create a second copy of the user's entire photo library
+- Search and face grouping run on-device
+- Face groups are similarity-based and do not assign real-world identities or names
+- Vision analysis uses resized working images instead of copying full-resolution originals into TideLibrary
 
 Bundle ID: `com.jdarkyeka6.TideLibrary`
 Deployment target: iOS 17
