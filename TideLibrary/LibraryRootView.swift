@@ -1,232 +1,51 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct LibraryRootView: View {
     @StateObject private var photos = PhotoLibraryStore()
-    @StateObject private var cloud = CloudFolderStore()
+    @StateObject private var vision = VisionIndexStore()
 
     var body: some View {
         TabView {
-            PhotosScreen(photos: photos, cloud: cloud)
+            PhotoTimelineView(photos: photos, vision: vision)
                 .tabItem {
                     Label("Photos", systemImage: "photo.on.rectangle.angled")
                 }
 
-            AlbumsScreen(photos: photos)
+            PeopleView(photos: photos, vision: vision)
                 .tabItem {
-                    Label("Albums", systemImage: "rectangle.stack")
+                    Label("People", systemImage: "person.2.fill")
                 }
 
-            SourcesScreen(photos: photos, cloud: cloud)
+            SmartSearchView(photos: photos, vision: vision)
                 .tabItem {
-                    Label("Sources", systemImage: "externaldrive.connected.to.line.below")
+                    Label("Search", systemImage: "magnifyingglass")
                 }
         }
         .tint(.white)
         .task {
             await photos.requestAccessIfNeeded()
         }
-        .alert("TideLibrary", isPresented: Binding(
-            get: { photos.errorMessage != nil || cloud.errorMessage != nil },
-            set: {
-                if !$0 {
-                    photos.errorMessage = nil
-                    cloud.errorMessage = nil
+        .task(id: photos.assets.count) {
+            guard photos.canRead else { return }
+            vision.startIndexing(assets: photos.assets)
+        }
+        .alert(
+            "TideLibrary",
+            isPresented: Binding(
+                get: { photos.errorMessage != nil },
+                set: { value, _ in
+                    if !value {
+                        photos.errorMessage = nil
+                    }
                 }
-            }
-        )) {
+            )
+        ) {
             Button("OK", role: .cancel) {
                 photos.errorMessage = nil
-                cloud.errorMessage = nil
             }
         } message: {
-            Text(photos.errorMessage ?? cloud.errorMessage ?? "Unknown library error")
+            Text(photos.errorMessage ?? "Unknown Photos error")
         }
-    }
-}
-
-private enum UnifiedAsset: Identifiable {
-    case photo(PhotoAssetRef)
-    case cloud(CloudAssetRef)
-
-    var id: String {
-        switch self {
-        case .photo(let asset): return "photos:\(asset.id)"
-        case .cloud(let asset): return "drive:\(asset.id)"
-        }
-    }
-
-    var createdAt: Date {
-        switch self {
-        case .photo(let asset): return asset.createdAt
-        case .cloud(let asset): return asset.createdAt
-        }
-    }
-}
-
-private struct PhotosScreen: View {
-    @ObservedObject var photos: PhotoLibraryStore
-    @ObservedObject var cloud: CloudFolderStore
-
-    @State private var source: LibrarySourceFilter = .all
-    @State private var query = ""
-    @State private var selectedPhotoID: String?
-    @State private var selectedCloud: CloudAssetRef?
-
-    private let columns = [
-        GridItem(.flexible(), spacing: 2),
-        GridItem(.flexible(), spacing: 2),
-        GridItem(.flexible(), spacing: 2)
-    ]
-
-    private var filteredPhotos: [PhotoAssetRef] {
-        guard !query.isEmpty else { return photos.assets }
-        let needle = query.lowercased()
-        return photos.assets.filter { $0.searchableText.contains(needle) }
-    }
-
-    private var filteredCloud: [CloudAssetRef] {
-        guard !query.isEmpty else { return cloud.assets }
-        let needle = query.lowercased()
-        return cloud.assets.filter { $0.name.lowercased().contains(needle) }
-    }
-
-    private var visibleItems: [UnifiedAsset] {
-        switch source {
-        case .photos:
-            return filteredPhotos.map(UnifiedAsset.photo)
-        case .drive:
-            return filteredCloud.map(UnifiedAsset.cloud)
-        case .all:
-            return (
-                filteredPhotos.map(UnifiedAsset.photo) +
-                filteredCloud.map(UnifiedAsset.cloud)
-            )
-            .sorted { $0.createdAt > $1.createdAt }
-        }
-    }
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Picker("Source", selection: $source) {
-                    ForEach(LibrarySourceFilter.allCases) { value in
-                        Text(value.rawValue).tag(value)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-
-                content
-            }
-            .background(Color.black)
-            .navigationTitle("TideLibrary")
-            .searchable(text: $query, prompt: "Search photos, dates or Drive files")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    if photos.isLoading || cloud.isIndexing {
-                        ProgressView()
-                    } else {
-                        Button {
-                            photos.reload()
-                            cloud.refresh()
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                    }
-                }
-            }
-        }
-        .fullScreenCover(item: Binding(
-            get: {
-                guard let selectedPhotoID else { return nil }
-                return PhotoSelection(id: selectedPhotoID)
-            },
-            set: { value, _ in
-                selectedPhotoID = value?.id
-            }
-        )) { (selection: PhotoSelection) in
-            PhotoGalleryViewer(
-                assets: filteredPhotos,
-                initialID: selection.id
-            )
-        }
-        .fullScreenCover(item: $selectedCloud) { asset in
-            CloudFileViewer(asset: asset)
-        }
-    }
-
-    @ViewBuilder
-    private var content: some View {
-        if source != .drive && photos.needsPermission {
-            permissionPrompt
-        } else if visibleItems.isEmpty {
-            ContentUnavailableView(
-                source == .drive ? "No Drive media" : "No photos yet",
-                systemImage: source == .drive ? "externaldrive" : "photo.stack",
-                description: Text(emptyDescription)
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: 2) {
-                    ForEach(visibleItems) { item in
-                        Button {
-                            switch item {
-                            case .photo(let asset):
-                                selectedPhotoID = asset.id
-                            case .cloud(let asset):
-                                selectedCloud = asset
-                            }
-                        } label: {
-                            Group {
-                                switch item {
-                                case .photo(let asset):
-                                    ApplePhotoThumbnail(asset: asset)
-                                case .cloud(let asset):
-                                    CloudThumbnail(asset: asset)
-                                }
-                            }
-                            .aspectRatio(1, contentMode: .fit)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-        }
-    }
-
-    private var permissionPrompt: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "photo.badge.plus")
-                .font(.system(size: 46))
-                .foregroundStyle(.secondary)
-            Text("Connect Apple Photos")
-                .font(.title3.bold())
-            Text("TideLibrary shows your iCloud Photos without duplicating your whole library.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .padding(.horizontal, 36)
-            Button("Allow Photos Access") {
-                Task { await photos.requestAccessIfNeeded() }
-            }
-            .buttonStyle(.borderedProminent)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private var emptyDescription: String {
-        if source == .drive {
-            return cloud.isConnected
-                ? "No supported photos or videos were found in \(cloud.displayName)."
-                : "Connect a Google Drive folder from the Sources tab."
-        }
-        if photos.denied {
-            return "Photos access is off. You can enable it in Settings."
-        }
-        return "Your library will appear here."
     }
 }
 
@@ -234,90 +53,11 @@ private struct PhotoSelection: Identifiable {
     let id: String
 }
 
-private struct AlbumsScreen: View {
+private struct PhotoTimelineView: View {
     @ObservedObject var photos: PhotoLibraryStore
+    @ObservedObject var vision: VisionIndexStore
 
-    private let columns = [
-        GridItem(.flexible(), spacing: 12),
-        GridItem(.flexible(), spacing: 12)
-    ]
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if photos.albums.isEmpty {
-                    ContentUnavailableView(
-                        "No albums",
-                        systemImage: "rectangle.stack",
-                        description: Text("Your Apple Photos albums will appear here.")
-                    )
-                } else {
-                    ScrollView {
-                        LazyVGrid(columns: columns, spacing: 18) {
-                            ForEach(photos.albums) { album in
-                                NavigationLink {
-                                    AlbumDetailView(album: album, photos: photos)
-                                } label: {
-                                    AlbumCard(album: album, photos: photos)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(14)
-                    }
-                }
-            }
-            .background(Color.black)
-            .navigationTitle("Albums")
-        }
-    }
-}
-
-private struct AlbumCard: View {
-    let album: PhotoAlbumRef
-    @ObservedObject var photos: PhotoLibraryStore
-
-    private var cover: PhotoAssetRef? {
-        guard let id = album.coverAssetID else { return nil }
-        return photos.assets.first { $0.id == id }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.white.opacity(0.07))
-
-                if let cover {
-                    ApplePhotoThumbnail(asset: cover)
-                } else {
-                    Image(systemName: "photo.on.rectangle")
-                        .font(.title)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .aspectRatio(1, contentMode: .fit)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-            Text(album.title)
-                .font(.headline)
-                .foregroundStyle(.white)
-                .lineLimit(1)
-            Text("\(album.count) items")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-}
-
-private struct AlbumDetailView: View {
-    let album: PhotoAlbumRef
-    @ObservedObject var photos: PhotoLibraryStore
-    @State private var selectedID: String?
-
-    private var albumAssets: [PhotoAssetRef] {
-        photos.assets(in: album)
-    }
+    @State private var selection: PhotoSelection?
 
     private let columns = [
         GridItem(.flexible(), spacing: 2),
@@ -325,12 +65,226 @@ private struct AlbumDetailView: View {
         GridItem(.flexible(), spacing: 2)
     ]
 
+    private var monthGroups: [(title: String, assets: [PhotoAssetRef])] {
+        let calendar = Calendar.current
+        let grouped = Dictionary(grouping: photos.assets) { asset in
+            let parts = calendar.dateComponents([.year, .month], from: asset.createdAt)
+            return "(parts.year ?? 0)-(parts.month ?? 0)"
+        }
+
+        return grouped.values
+            .compactMap { values -> (String, [PhotoAssetRef], Date)? in
+                guard let newest = values.max(by: { $0.createdAt < $1.createdAt }) else {
+                    return nil
+                }
+                let title = newest.createdAt.formatted(.dateTime.month(.wide).year())
+                return (
+                    title,
+                    values.sorted { $0.createdAt > $1.createdAt },
+                    newest.createdAt
+                )
+            }
+            .sorted { $0.2 > $1.2 }
+            .map { ($0.0, $0.1) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if !photos.canRead {
+                    PhotosPermissionView(photos: photos)
+                } else if photos.assets.isEmpty && photos.isLoading {
+                    ProgressView("Loading Photos…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if photos.assets.isEmpty {
+                    ContentUnavailableView(
+                        "No Photos",
+                        systemImage: "photo.stack",
+                        description: Text("Your Apple Photos library will appear here.")
+                    )
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 18, pinnedViews: [.sectionHeaders]) {
+                            ForEach(Array(monthGroups.enumerated()), id: \.offset) { _, group in
+                                Section {
+                                    LazyVGrid(columns: columns, spacing: 2) {
+                                        ForEach(group.assets) { asset in
+                                            Button {
+                                                selection = PhotoSelection(id: asset.id)
+                                            } label: {
+                                                ApplePhotoThumbnail(asset: asset)
+                                                    .aspectRatio(1, contentMode: .fit)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                } header: {
+                                    HStack {
+                                        Text(group.title)
+                                            .font(.headline)
+                                        Spacer()
+                                        Text("(group.assets.count)")
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(.black.opacity(0.92))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .background(Color.black)
+            .navigationTitle("Photos")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    if vision.isIndexing {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("(vision.indexedCount)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("(photos.assets.count)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .fullScreenCover(item: $selection) { selected in
+            PhotoGalleryViewer(
+                assets: photos.assets,
+                initialID: selected.id
+            )
+        }
+    }
+}
+
+private struct PeopleView: View {
+    @ObservedObject var photos: PhotoLibraryStore
+    @ObservedObject var vision: VisionIndexStore
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 18),
+        GridItem(.flexible(), spacing: 18)
+    ]
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if !photos.canRead {
+                    PhotosPermissionView(photos: photos)
+                } else if vision.people.isEmpty {
+                    peopleEmptyState
+                } else {
+                    ScrollView {
+                        LazyVGrid(columns: columns, spacing: 22) {
+                            ForEach(Array(vision.people.enumerated()), id: \.element.id) { index, person in
+                                NavigationLink {
+                                    PersonDetailView(
+                                        title: "Person (index + 1)",
+                                        person: person,
+                                        photos: photos,
+                                        vision: vision
+                                    )
+                                } label: {
+                                    VStack(spacing: 10) {
+                                        FaceThumbnail(
+                                            assetID: person.representativeAssetID,
+                                            bounds: person.representativeFaceBounds
+                                        )
+                                        .aspectRatio(1, contentMode: .fit)
+
+                                        VStack(spacing: 2) {
+                                            Text("Person (index + 1)")
+                                                .font(.headline)
+                                                .foregroundStyle(.white)
+                                            Text("(person.count) photos")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(18)
+
+                        Text("People are grouped on this iPhone using on-device image analysis. TideLibrary does not upload faces.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 28)
+                            .padding(.bottom, 24)
+                    }
+                }
+            }
+            .background(Color.black)
+            .navigationTitle("People")
+        }
+    }
+
+    private var peopleEmptyState: some View {
+        VStack(spacing: 18) {
+            if vision.isIndexing {
+                ProgressView(value: vision.progress)
+                    .frame(maxWidth: 240)
+
+                Text("Finding people…")
+                    .font(.title3.bold())
+
+                Text("(vision.indexedCount) of (vision.indexingTarget) recent photos checked")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "person.2")
+                    .font(.system(size: 48))
+                    .foregroundStyle(.secondary)
+
+                Text("No people groups yet")
+                    .font(.title3.bold())
+
+                Text("Groups appear after TideLibrary finds the same face in more than one photo.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 36)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct PersonDetailView: View {
+    let title: String
+    let person: PersonCluster
+
+    @ObservedObject var photos: PhotoLibraryStore
+    @ObservedObject var vision: VisionIndexStore
+
+    @State private var selection: PhotoSelection?
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2)
+    ]
+
+    private var personAssets: [PhotoAssetRef] {
+        vision.assets(for: person, in: photos.assets)
+    }
+
     var body: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 2) {
-                ForEach(albumAssets) { asset in
+                ForEach(personAssets) { asset in
                     Button {
-                        selectedID = asset.id
+                        selection = PhotoSelection(id: asset.id)
                     } label: {
                         ApplePhotoThumbnail(asset: asset)
                             .aspectRatio(1, contentMode: .fit)
@@ -340,141 +294,189 @@ private struct AlbumDetailView: View {
             }
         }
         .background(Color.black)
-        .navigationTitle(album.title)
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
-        .fullScreenCover(item: Binding(
-            get: {
-                guard let selectedID else { return nil }
-                return PhotoSelection(id: selectedID)
-            },
-            set: { value, _ in selectedID = value?.id }
-        )) { (selection: PhotoSelection) in
-            PhotoGalleryViewer(assets: albumAssets, initialID: selection.id)
+        .fullScreenCover(item: $selection) { selected in
+            PhotoGalleryViewer(
+                assets: personAssets,
+                initialID: selected.id
+            )
         }
     }
 }
 
-private struct SourcesScreen: View {
+private struct SmartSearchView: View {
     @ObservedObject var photos: PhotoLibraryStore
-    @ObservedObject var cloud: CloudFolderStore
-    @State private var showFolderPicker = false
+    @ObservedObject var vision: VisionIndexStore
+
+    @State private var query = ""
+    @State private var selection: PhotoSelection?
+
+    private let columns = [
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2),
+        GridItem(.flexible(), spacing: 2)
+    ]
+
+    private var results: [PhotoAssetRef] {
+        vision.search(assets: photos.assets, query: query)
+    }
 
     var body: some View {
         NavigationStack {
-            List {
-                Section("Apple") {
-                    sourceRow(
-                        icon: "photo.stack.fill",
-                        title: "Apple Photos + iCloud",
-                        detail: photos.canRead
-                            ? "\(photos.assets.count) items available"
-                            : "Not connected",
-                        connected: photos.canRead
-                    )
-
-                    if photos.denied {
-                        Button("Open Photos Settings") {
-                            guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
-                            UIApplication.shared.open(url)
+            Group {
+                if !photos.canRead {
+                    PhotosPermissionView(photos: photos)
+                } else if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    searchHome
+                } else if results.isEmpty {
+                    ContentUnavailableView.search(text: query)
+                } else {
+                    ScrollView {
+                        HStack {
+                            Text("(results.count) results")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+                            Spacer()
                         }
-                    } else if !photos.canRead {
-                        Button("Connect Apple Photos") {
-                            Task { await photos.requestAccessIfNeeded() }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+
+                        LazyVGrid(columns: columns, spacing: 2) {
+                            ForEach(results) { asset in
+                                Button {
+                                    selection = PhotoSelection(id: asset.id)
+                                } label: {
+                                    ApplePhotoThumbnail(asset: asset)
+                                        .aspectRatio(1, contentMode: .fit)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                 }
+            }
+            .background(Color.black)
+            .navigationTitle("Search")
+            .searchable(
+                text: $query,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Dog, receipt, September 2026, screenshots…"
+            )
+        }
+        .fullScreenCover(item: $selection) { selected in
+            PhotoGalleryViewer(
+                assets: results,
+                initialID: selected.id
+            )
+        }
+    }
 
-                Section("Cloud") {
-                    sourceRow(
-                        icon: "externaldrive.fill",
-                        title: "Google Drive / Files",
-                        detail: cloud.isConnected
-                            ? "\(cloud.displayName) · \(cloud.assets.count) media items"
-                            : "Choose a folder from Google Drive in Files",
-                        connected: cloud.isConnected
-                    )
-
-                    if cloud.isConnected {
-                        Button("Refresh linked folder") {
-                            cloud.refresh()
-                        }
-                        Button("Change folder") {
-                            showFolderPicker = true
-                        }
-                        Button("Disconnect", role: .destructive) {
-                            cloud.disconnect()
-                        }
-                    } else {
-                        Button("Connect Google Drive Folder") {
-                            showFolderPicker = true
-                        }
-                    }
-                }
-
-                Section {
-                    Text("TideLibrary indexes references and thumbnails. It does not copy your entire Apple Photos or cloud library into the app. Full media is requested only when you open it.")
-                        .font(.footnote)
+    private var searchHome: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Search what’s in your photos")
+                        .font(.title2.bold())
+                    Text("TideLibrary searches dates and media instantly, then adds image labels and text found inside photos as the on-device index grows.")
+                        .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
-            }
-            .navigationTitle("Sources")
-        }
-        .fileImporter(
-            isPresented: $showFolderPicker,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first {
-                    cloud.connect(to: url)
+
+                LazyVGrid(
+                    columns: [
+                        GridItem(.flexible()),
+                        GridItem(.flexible())
+                    ],
+                    spacing: 10
+                ) {
+                    suggestion("Screenshots", symbol: "rectangle.on.rectangle")
+                    suggestion("Videos", symbol: "video.fill")
+                    suggestion("People", symbol: "person.2.fill")
+                    suggestion("Receipts", symbol: "doc.text")
+                    suggestion("Dogs", symbol: "dog.fill")
+                    suggestion("September 2026", symbol: "calendar")
                 }
-            case .failure(let error):
-                cloud.errorMessage = "Could not connect folder: \(error.localizedDescription)"
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("On-device index")
+                            .font(.headline)
+                        Spacer()
+                        Text("(vision.records.count) smart photos")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if vision.isIndexing {
+                        ProgressView(value: vision.progress)
+                        Text("Analysing recent photos without uploading them.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Search index ready for this session.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(16)
+                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
             }
+            .padding(18)
         }
     }
 
-    private func sourceRow(
-        icon: String,
-        title: String,
-        detail: String,
-        connected: Bool
-    ) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.title2)
-                .frame(width: 34)
-            VStack(alignment: .leading, spacing: 2) {
+    private func suggestion(_ title: String, symbol: String) -> some View {
+        Button {
+            query = title
+        } label: {
+            HStack(spacing: 9) {
+                Image(systemName: symbol)
                 Text(title)
-                    .font(.headline)
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.subheadline.bold())
+                Spacer()
             }
-            Spacer()
-            Image(systemName: connected ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(connected ? .green : .secondary)
+            .foregroundStyle(.white)
+            .padding(14)
+            .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 14))
         }
-        .padding(.vertical, 4)
+        .buttonStyle(.plain)
     }
 }
 
-private struct CloudFileViewer: View {
-    @Environment(\.dismiss) private var dismiss
-    let asset: CloudAssetRef
+private struct PhotosPermissionView: View {
+    @ObservedObject var photos: PhotoLibraryStore
 
     var body: some View {
-        NavigationStack {
-            QuickLookView(url: asset.url)
-                .ignoresSafeArea(edges: .bottom)
-                .navigationTitle(asset.name)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Done") { dismiss() }
+        VStack(spacing: 14) {
+            Image(systemName: "photo.badge.plus")
+                .font(.system(size: 46))
+                .foregroundStyle(.secondary)
+
+            Text("Connect Apple Photos")
+                .font(.title3.bold())
+
+            Text("TideLibrary views your Photos and iCloud Photos without copying your whole library into the app.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 36)
+
+            if photos.denied {
+                Button("Open Settings") {
+                    guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                    UIApplication.shared.open(url)
+                }
+                .buttonStyle(.borderedProminent)
+            } else {
+                Button("Allow Photos Access") {
+                    Task {
+                        await photos.requestAccessIfNeeded()
                     }
                 }
+                .buttonStyle(.borderedProminent)
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
