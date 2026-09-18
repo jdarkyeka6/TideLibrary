@@ -9,36 +9,60 @@ struct PhotoAssetRef: Identifiable, Hashable {
     let pixelHeight: Int
     let duration: TimeInterval
     let isFavorite: Bool
+    let isScreenshot: Bool
+    let isLivePhoto: Bool
 
     var isVideo: Bool { mediaType == .video }
 
     var searchableText: String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MMMM yyyy EEEE"
-        return "\(isVideo ? "video" : "photo") \(formatter.string(from: createdAt))".lowercased()
+        let month = createdAt.formatted(.dateTime.month(.wide).year().day())
+        let weekday = createdAt.formatted(.dateTime.weekday(.wide))
+        var parts = [
+            isVideo ? "video movie clip" : "photo image picture",
+            month,
+            weekday
+        ]
+        if isFavorite { parts.append("favorite favourite") }
+        if isScreenshot { parts.append("screenshot screen capture") }
+        if isLivePhoto { parts.append("live photo") }
+        return parts.joined(separator: " ").lowercased()
     }
 }
 
-struct PhotoAlbumRef: Identifiable, Hashable {
+struct SmartSearchRecord: Codable, Hashable {
+    let assetID: String
+    let labels: [String]
+    let recognizedText: String
+    let faceCount: Int
+
+    var searchableText: String {
+        (labels.joined(separator: " ") + " " + recognizedText).lowercased()
+    }
+}
+
+struct FaceBounds: Hashable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+
+    init(_ rect: CGRect) {
+        x = rect.origin.x
+        y = rect.origin.y
+        width = rect.size.width
+        height = rect.size.height
+    }
+
+    var cgRect: CGRect {
+        CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
+struct PersonCluster: Identifiable, Hashable {
     let id: String
-    let title: String
-    let count: Int
-    let coverAssetID: String?
-}
+    let representativeAssetID: String
+    let representativeFaceBounds: FaceBounds
+    let assetIDs: [String]
 
-struct CloudAssetRef: Identifiable, Hashable {
-    let url: URL
-    let name: String
-    let createdAt: Date
-    let isVideo: Bool
-
-    var id: String { url.absoluteString }
-}
-
-enum LibrarySourceFilter: String, CaseIterable, Identifiable {
-    case all = "All"
-    case photos = "Photos"
-    case drive = "Drive"
-
-    var id: String { rawValue }
+    var count: Int { assetIDs.count }
 }
