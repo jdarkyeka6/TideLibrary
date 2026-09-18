@@ -40,7 +40,7 @@ struct SmartSearchRecord: Codable, Hashable {
     }
 }
 
-struct FaceBounds: Hashable {
+struct FaceBounds: Codable, Hashable {
     let x: Double
     let y: Double
     let width: Double
@@ -58,7 +58,7 @@ struct FaceBounds: Hashable {
     }
 }
 
-struct PersonCluster: Identifiable, Hashable {
+struct PersonCluster: Identifiable, Codable, Hashable {
     let id: String
     let representativeAssetID: String
     let representativeFaceBounds: FaceBounds
