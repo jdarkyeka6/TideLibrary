@@ -7,20 +7,27 @@ import Vision
 final class VisionIndexStore: ObservableObject {
     @Published private(set) var records: [String: SmartSearchRecord] = [:]
     @Published private(set) var people: [PersonCluster] = []
+    @Published private(set) var personNames: [String: String] = [:]
     @Published private(set) var isIndexing = false
     @Published private(set) var indexedCount = 0
     @Published private(set) var indexingTarget = 0
 
-    private let analysisQueue = DispatchQueue(label: "com.jdarkyeka6.TideLibrary.vision", qos: .utility)
+    private let analysisQueue = DispatchQueue(
+        label: "com.jdarkyeka6.TideLibrary.vision",
+        qos: .utility
+    )
+
     private var workingPeople: [WorkingPerson] = []
     private var activeLibrarySignature = ""
 
     private let maxAssetsPerSession = 1000
     private let maxFacesPerPhoto = 3
     private let personDistanceThreshold: Float = 11.5
+    private let personNamesKey = "TideLibrary.PersonNames.v1"
 
     init() {
         loadRecords()
+        loadPersonNames()
     }
 
     var progress: Double {
@@ -33,7 +40,7 @@ final class VisionIndexStore: ObservableObject {
         guard !imageAssets.isEmpty else { return }
 
         let targetAssets = Array(imageAssets.prefix(maxAssetsPerSession))
-        let signature = targetAssets.first?.id ?? "" + ":\(targetAssets.count)"
+        let signature = "\(targetAssets.first?.id ?? "none"):\(targetAssets.count)"
 
         guard !isIndexing, activeLibrarySignature != signature else { return }
 
@@ -86,16 +93,185 @@ final class VisionIndexStore: ObservableObject {
         }
     }
 
-    func search(assets: [PhotoAssetRef], query: String) -> [PhotoAssetRef] {
-        let terms = query
+    func displayName(for person: PersonCluster, fallbackIndex: Int? = nil) -> String {
+        if let name = personNames[person.id],
+           !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return name
+        }
+
+        if let fallbackIndex {
+            return "Person \(fallbackIndex + 1)"
+        }
+
+        return "Unnamed person"
+    }
+
+    func setPersonName(_ rawName: String, for person: PersonCluster) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if name.isEmpty {
+            personNames.removeValue(forKey: person.id)
+        } else {
+            personNames[person.id] = name
+        }
+
+        UserDefaults.standard.set(personNames, forKey: personNamesKey)
+    }
+
+    func searchAsync(
+        assets: [PhotoAssetRef],
+        query: String
+    ) async -> [PhotoAssetRef] {
+        let recordSnapshot = records
+        let peopleSnapshot = people
+        let nameSnapshot = personNames
+
+        return await Task.detached(priority: .userInitiated) {
+            Self.filterAssets(
+                assets,
+                query: query,
+                records: recordSnapshot,
+                people: peopleSnapshot,
+                personNames: nameSnapshot
+            )
+        }.value
+    }
+
+    func assets(
+        for person: PersonCluster,
+        in library: [PhotoAssetRef]
+    ) -> [PhotoAssetRef] {
+        let ids = Set(person.assetIDs)
+        return library.filter { ids.contains($0.id) }
+    }
+
+    private static func filterAssets(
+        _ assets: [PhotoAssetRef],
+        query: String,
+        records: [String: SmartSearchRecord],
+        people: [PersonCluster],
+        personNames: [String: String]
+    ) -> [PhotoAssetRef] {
+        let rawTerms = query
             .lowercased()
             .split(whereSeparator: { $0.isWhitespace || $0 == "," })
             .map(String.init)
             .filter { !$0.isEmpty }
 
-        guard !terms.isEmpty else { return [] }
+        guard !rawTerms.isEmpty else { return [] }
+
+        let videoTerms: Set<String> = [
+            "vid", "vids", "video", "videos", "movie", "movies", "clip", "clips"
+        ]
+
+        let photoTerms: Set<String> = [
+            "photo", "photos", "pic", "pics", "picture", "pictures", "image", "images"
+        ]
+
+        let monthAliases: [String: Int] = [
+            "jan": 1, "january": 1,
+            "feb": 2, "february": 2,
+            "mar": 3, "march": 3,
+            "apr": 4, "april": 4,
+            "may": 5,
+            "jun": 6, "june": 6,
+            "jul": 7, "july": 7,
+            "aug": 8, "august": 8,
+            "sep": 9, "sept": 9, "september": 9,
+            "oct": 10, "october": 10,
+            "nov": 11, "november": 11,
+            "dec": 12, "december": 12
+        ]
+
+        var requireVideo: Bool?
+        var requiredMonth: Int?
+        var requiredYear: Int?
+        var textTerms: [String] = []
+        var requiredPersonSets: [Set<String>] = []
+
+        let namedPeople: [(tokens: Set<String>, assetIDs: Set<String>)] = people.compactMap { person in
+            guard let rawName = personNames[person.id]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !rawName.isEmpty else {
+                return nil
+            }
+
+            let tokens = Set(
+                rawName
+                    .lowercased()
+                    .split(whereSeparator: { $0.isWhitespace || $0 == "-" })
+                    .map(String.init)
+            )
+
+            guard !tokens.isEmpty else { return nil }
+            return (tokens, Set(person.assetIDs))
+        }
+
+        for term in rawTerms {
+            if videoTerms.contains(term) {
+                requireVideo = true
+                continue
+            }
+
+            if photoTerms.contains(term) {
+                requireVideo = false
+                continue
+            }
+
+            if let month = monthAliases[term] {
+                requiredMonth = month
+                continue
+            }
+
+            if term.count == 4,
+               let year = Int(term),
+               (1900...2200).contains(year) {
+                requiredYear = year
+                continue
+            }
+
+            let matchingPersonSets = namedPeople
+                .filter { $0.tokens.contains(term) }
+                .map(\.assetIDs)
+
+            if !matchingPersonSets.isEmpty {
+                let combined = matchingPersonSets.reduce(into: Set<String>()) {
+                    $0.formUnion($1)
+                }
+                requiredPersonSets.append(combined)
+                continue
+            }
+
+            textTerms.append(term)
+        }
+
+        let calendar = Calendar.current
 
         return assets.filter { asset in
+            if let requireVideo, asset.isVideo != requireVideo {
+                return false
+            }
+
+            if let requiredMonth,
+               calendar.component(.month, from: asset.createdAt) != requiredMonth {
+                return false
+            }
+
+            if let requiredYear,
+               calendar.component(.year, from: asset.createdAt) != requiredYear {
+                return false
+            }
+
+            for personIDs in requiredPersonSets {
+                if !personIDs.contains(asset.id) {
+                    return false
+                }
+            }
+
+            if textTerms.isEmpty {
+                return true
+            }
+
             var haystack = asset.searchableText
 
             if let record = records[asset.id] {
@@ -110,13 +286,10 @@ final class VisionIndexStore: ObservableObject {
                 }
             }
 
-            return terms.allSatisfy { haystack.localizedCaseInsensitiveContains($0) }
+            return textTerms.allSatisfy {
+                haystack.localizedCaseInsensitiveContains($0)
+            }
         }
-    }
-
-    func assets(for person: PersonCluster, in library: [PhotoAssetRef]) -> [PhotoAssetRef] {
-        let ids = Set(person.assetIDs)
-        return library.filter { ids.contains($0.id) }
     }
 
     private func publishPeople() {
@@ -165,7 +338,10 @@ final class VisionIndexStore: ObservableObject {
         } else {
             workingPeople.append(
                 WorkingPerson(
-                    id: UUID().uuidString,
+                    id: Self.stablePersonID(
+                        assetID: assetID,
+                        bounds: face.bounds
+                    ),
                     representativeAssetID: assetID,
                     representativeFaceBounds: face.bounds,
                     representativeFeature: face.feature,
@@ -173,6 +349,23 @@ final class VisionIndexStore: ObservableObject {
                 )
             )
         }
+    }
+
+    private static func stablePersonID(
+        assetID: String,
+        bounds: FaceBounds
+    ) -> String {
+        func rounded(_ value: Double) -> String {
+            String(format: "%.3f", value)
+        }
+
+        return [
+            assetID,
+            rounded(bounds.x),
+            rounded(bounds.y),
+            rounded(bounds.width),
+            rounded(bounds.height)
+        ].joined(separator: "|")
     }
 
     private func requestAnalysisImage(assetID: String) async -> CGImage? {
@@ -268,7 +461,9 @@ final class VisionIndexStore: ObservableObject {
                 }
 
                 let faceObservations = (faceRequest.results ?? [])
-                    .filter { $0.boundingBox.width * $0.boundingBox.height >= 0.012 }
+                    .filter {
+                        $0.boundingBox.width * $0.boundingBox.height >= 0.012
+                    }
                     .sorted {
                         ($0.boundingBox.width * $0.boundingBox.height) >
                         ($1.boundingBox.width * $1.boundingBox.height)
@@ -375,7 +570,11 @@ final class VisionIndexStore: ObservableObject {
                 appropriateFor: nil,
                 create: true
             )
-            let folder = base.appendingPathComponent("TideLibrary", isDirectory: true)
+
+            let folder = base.appendingPathComponent(
+                "TideLibrary",
+                isDirectory: true
+            )
 
             if !FileManager.default.fileExists(atPath: folder.path) {
                 try FileManager.default.createDirectory(
@@ -409,9 +608,19 @@ final class VisionIndexStore: ObservableObject {
         guard let url = indexURL else { return }
 
         let values = Array(records.values)
-
         guard let data = try? JSONEncoder().encode(values) else { return }
+
         try? data.write(to: url, options: .atomic)
+    }
+
+    private func loadPersonNames() {
+        guard let stored = UserDefaults.standard.dictionary(
+            forKey: personNamesKey
+        ) as? [String: String] else {
+            return
+        }
+
+        personNames = stored
     }
 }
 
