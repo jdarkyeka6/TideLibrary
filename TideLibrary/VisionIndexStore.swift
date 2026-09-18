@@ -3,6 +3,11 @@ import Photos
 import UIKit
 import Vision
 
+private struct PersistedIndexState: Codable {
+    var knownAssetIDs: [String]
+    var seededInitialLibrary: Bool
+}
+
 @MainActor
 final class VisionIndexStore: ObservableObject {
     @Published private(set) var records: [String: SmartSearchRecord] = [:]
@@ -18,15 +23,20 @@ final class VisionIndexStore: ObservableObject {
     )
 
     private var workingPeople: [WorkingPerson] = []
-    private var activeLibrarySignature = ""
+    private var storedClusters: [PersonCluster] = []
+    private var knownAssetIDs = Set<String>()
+    private var seededInitialLibrary = false
 
-    private let maxAssetsPerSession = 1000
+    private let initialIndexLimit = 1000
+    private let incrementalIndexLimit = 500
     private let maxFacesPerPhoto = 3
     private let personDistanceThreshold: Float = 11.5
     private let personNamesKey = "TideLibrary.PersonNames.v1"
 
     init() {
         loadRecords()
+        loadPeople()
+        loadIndexState()
         loadPersonNames()
     }
 
@@ -36,29 +46,61 @@ final class VisionIndexStore: ObservableObject {
     }
 
     func startIndexing(assets: [PhotoAssetRef]) {
-        guard !assets.isEmpty else { return }
+        guard !assets.isEmpty, !isIndexing else { return }
 
-        // Photos can vend preview thumbnails for both image and video assets.
-        // Indexing the video preview lets layered searches such as
-        // "vids oct Jake" include videos whose poster frame contains Jake.
-        let targetAssets = Array(assets.prefix(maxAssetsPerSession))
-        let signature = "\(targetAssets.first?.id ?? "none"):\(targetAssets.count)"
+        let currentIDs = Set(assets.map(\.id))
+        pruneDeletedAssets(currentIDs: currentIDs)
 
-        guard !isIndexing, activeLibrarySignature != signature else { return }
+        let isLegacyUpgrade =
+            !seededInitialLibrary &&
+            !records.isEmpty &&
+            storedClusters.isEmpty
 
-        activeLibrarySignature = signature
+        let targetAssets: [PhotoAssetRef]
+
+        if !seededInitialLibrary {
+            targetAssets = Array(assets.prefix(initialIndexLimit))
+        } else {
+            let newAssets = assets.filter { !knownAssetIDs.contains($0.id) }
+            targetAssets = Array(newAssets.prefix(incrementalIndexLimit))
+        }
+
+        guard !targetAssets.isEmpty else {
+            indexedCount = 0
+            indexingTarget = 0
+            return
+        }
+
         isIndexing = true
         indexedCount = 0
         indexingTarget = targetAssets.count
-        workingPeople.removeAll(keepingCapacity: true)
-        people = []
+
+        workingPeople = storedClusters.map {
+            WorkingPerson(
+                id: $0.id,
+                representativeAssetID: $0.representativeAssetID,
+                representativeFaceBounds: $0.representativeFaceBounds,
+                representativeFeature: nil,
+                assetIDs: Set($0.assetIDs)
+            )
+        }
 
         Task {
+            if seededInitialLibrary && !workingPeople.isEmpty {
+                await hydrateRepresentativeFeatures()
+            }
+
             for asset in targetAssets {
                 if Task.isCancelled { break }
 
                 guard let cgImage = await requestAnalysisImage(assetID: asset.id) else {
                     indexedCount += 1
+
+                    if seededInitialLibrary {
+                        knownAssetIDs.insert(asset.id)
+                        saveIndexState()
+                    }
+
                     continue
                 }
 
@@ -79,23 +121,47 @@ final class VisionIndexStore: ObservableObject {
 
                 indexedCount += 1
 
+                if seededInitialLibrary {
+                    knownAssetIDs.insert(asset.id)
+                }
+
                 if indexedCount % 25 == 0 {
                     publishPeople()
                 }
 
-                if indexedCount % 75 == 0 {
+                if indexedCount % 50 == 0 {
                     saveRecords()
+                    savePeople()
+                    saveIndexState()
                     await Task.yield()
                 }
             }
 
             publishPeople()
             saveRecords()
+            savePeople()
+
+            if !seededInitialLibrary {
+                seededInitialLibrary = true
+                knownAssetIDs = currentIDs
+            }
+
+            if isLegacyUpgrade {
+                seededInitialLibrary = true
+                knownAssetIDs = currentIDs
+            }
+
+            saveIndexState()
+
+            indexedCount = indexingTarget
             isIndexing = false
         }
     }
 
-    func displayName(for person: PersonCluster, fallbackIndex: Int? = nil) -> String {
+    func displayName(
+        for person: PersonCluster,
+        fallbackIndex: Int? = nil
+    ) -> String {
         if let name = personNames[person.id],
            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return name
@@ -163,11 +229,13 @@ final class VisionIndexStore: ObservableObject {
         guard !rawTerms.isEmpty else { return [] }
 
         let videoTerms: Set<String> = [
-            "vid", "vids", "video", "videos", "movie", "movies", "clip", "clips"
+            "vid", "vids", "video", "videos",
+            "movie", "movies", "clip", "clips"
         ]
 
         let photoTerms: Set<String> = [
-            "photo", "photos", "pic", "pics", "picture", "pictures", "image", "images"
+            "photo", "photos", "pic", "pics",
+            "picture", "pictures", "image", "images"
         ]
 
         let monthAliases: [String: Int] = [
@@ -191,23 +259,26 @@ final class VisionIndexStore: ObservableObject {
         var textTerms: [String] = []
         var requiredPersonSets: [Set<String>] = []
 
-        let namedPeople: [(tokens: Set<String>, assetIDs: Set<String>)] = people.compactMap { person in
-            guard let rawName = personNames[person.id]?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !rawName.isEmpty else {
-                return nil
+        let namedPeople: [(tokens: Set<String>, assetIDs: Set<String>)] =
+            people.compactMap { person in
+                guard let rawName = personNames[person.id]?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !rawName.isEmpty else {
+                    return nil
+                }
+
+                let tokens = Set(
+                    rawName
+                        .lowercased()
+                        .split(whereSeparator: {
+                            $0.isWhitespace || $0 == "-"
+                        })
+                        .map(String.init)
+                )
+
+                guard !tokens.isEmpty else { return nil }
+                return (tokens, Set(person.assetIDs))
             }
-
-            let tokens = Set(
-                rawName
-                    .lowercased()
-                    .split(whereSeparator: { $0.isWhitespace || $0 == "-" })
-                    .map(String.init)
-            )
-
-            guard !tokens.isEmpty else { return nil }
-            return (tokens, Set(person.assetIDs))
-        }
 
         for term in rawTerms {
             if videoTerms.contains(term) {
@@ -237,9 +308,12 @@ final class VisionIndexStore: ObservableObject {
                 .map(\.assetIDs)
 
             if !matchingPersonSets.isEmpty {
-                let combined = matchingPersonSets.reduce(into: Set<String>()) {
+                let combined = matchingPersonSets.reduce(
+                    into: Set<String>()
+                ) {
                     $0.formUnion($1)
                 }
+
                 requiredPersonSets.append(combined)
                 continue
             }
@@ -255,12 +329,18 @@ final class VisionIndexStore: ObservableObject {
             }
 
             if let requiredMonth,
-               calendar.component(.month, from: asset.createdAt) != requiredMonth {
+               calendar.component(
+                    .month,
+                    from: asset.createdAt
+               ) != requiredMonth {
                 return false
             }
 
             if let requiredYear,
-               calendar.component(.year, from: asset.createdAt) != requiredYear {
+               calendar.component(
+                    .year,
+                    from: asset.createdAt
+               ) != requiredYear {
                 return false
             }
 
@@ -280,11 +360,13 @@ final class VisionIndexStore: ObservableObject {
                 haystack += " " + record.searchableText
 
                 if record.faceCount > 0 {
-                    haystack += " person people face faces portrait"
+                    haystack +=
+                        " person people face faces portrait"
                 }
 
                 if !record.recognizedText.isEmpty {
-                    haystack += " text words document receipt sign screenshot"
+                    haystack +=
+                        " text words document receipt sign screenshot"
                 }
             }
 
@@ -294,36 +376,115 @@ final class VisionIndexStore: ObservableObject {
         }
     }
 
+    private func pruneDeletedAssets(currentIDs: Set<String>) {
+        records = records.filter {
+            currentIDs.contains($0.key)
+        }
+
+        storedClusters = storedClusters.compactMap { cluster in
+            let remaining = cluster.assetIDs.filter {
+                currentIDs.contains($0)
+            }
+
+            guard
+                currentIDs.contains(cluster.representativeAssetID),
+                !remaining.isEmpty
+            else {
+                personNames.removeValue(forKey: cluster.id)
+                return nil
+            }
+
+            return PersonCluster(
+                id: cluster.id,
+                representativeAssetID:
+                    cluster.representativeAssetID,
+                representativeFaceBounds:
+                    cluster.representativeFaceBounds,
+                assetIDs: remaining
+            )
+        }
+
+        people = storedClusters
+            .filter { $0.count >= 2 }
+            .sorted { $0.count > $1.count }
+
+        knownAssetIDs.formIntersection(currentIDs)
+    }
+
+    private func hydrateRepresentativeFeatures() async {
+        for index in workingPeople.indices {
+            if workingPeople[index].representativeFeature != nil {
+                continue
+            }
+
+            let assetID =
+                workingPeople[index].representativeAssetID
+            let bounds =
+                workingPeople[index].representativeFaceBounds
+
+            guard
+                let image = await requestAnalysisImage(
+                    assetID: assetID
+                ),
+                let crop = Self.cropFace(
+                    from: image,
+                    normalizedBounds: bounds.cgRect
+                ),
+                let feature = await featurePrint(for: crop)
+            else {
+                continue
+            }
+
+            workingPeople[index].representativeFeature =
+                feature
+        }
+    }
+
     private func publishPeople() {
-        people = workingPeople
-            .filter { $0.assetIDs.count >= 2 }
+        storedClusters = workingPeople
             .map {
                 PersonCluster(
                     id: $0.id,
-                    representativeAssetID: $0.representativeAssetID,
-                    representativeFaceBounds: $0.representativeFaceBounds,
+                    representativeAssetID:
+                        $0.representativeAssetID,
+                    representativeFaceBounds:
+                        $0.representativeFaceBounds,
                     assetIDs: Array($0.assetIDs)
                 )
             }
+
+        people = storedClusters
+            .filter { $0.count >= 2 }
             .sorted {
                 if $0.count == $1.count {
                     return $0.id < $1.id
                 }
+
                 return $0.count > $1.count
             }
     }
 
-    private func addFace(_ face: DetectedFace, assetID: String) {
+    private func addFace(
+        _ face: DetectedFace,
+        assetID: String
+    ) {
         var bestIndex: Int?
         var bestDistance = Float.greatestFiniteMagnitude
 
         for index in workingPeople.indices {
+            guard
+                let representativeFeature =
+                    workingPeople[index].representativeFeature
+            else {
+                continue
+            }
+
             var distance: Float = 0
 
             do {
                 try face.feature.computeDistance(
                     &distance,
-                    to: workingPeople[index].representativeFeature
+                    to: representativeFeature
                 )
             } catch {
                 continue
@@ -335,8 +496,11 @@ final class VisionIndexStore: ObservableObject {
             }
         }
 
-        if let bestIndex, bestDistance <= personDistanceThreshold {
-            workingPeople[bestIndex].assetIDs.insert(assetID)
+        if let bestIndex,
+           bestDistance <= personDistanceThreshold {
+            workingPeople[bestIndex]
+                .assetIDs
+                .insert(assetID)
         } else {
             workingPeople.append(
                 WorkingPerson(
@@ -370,7 +534,9 @@ final class VisionIndexStore: ObservableObject {
         ].joined(separator: "|")
     }
 
-    private func requestAnalysisImage(assetID: String) async -> CGImage? {
+    private func requestAnalysisImage(
+        assetID: String
+    ) async -> CGImage? {
         guard let asset = PHAsset.fetchAssets(
             withLocalIdentifiers: [assetID],
             options: nil
@@ -383,31 +549,45 @@ final class VisionIndexStore: ObservableObject {
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = true
 
-        return await withCheckedContinuation { continuation in
+        return await withCheckedContinuation {
+            continuation in
+
             var completed = false
 
             PHImageManager.default().requestImage(
                 for: asset,
-                targetSize: CGSize(width: 720, height: 720),
+                targetSize: CGSize(
+                    width: 720,
+                    height: 720
+                ),
                 contentMode: .aspectFit,
                 options: options
             ) { image, info in
                 guard !completed else { return }
 
-                let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                let error = info?[PHImageErrorKey] as? Error
+                let cancelled =
+                    (info?[PHImageCancelledKey] as? Bool)
+                    ?? false
+                let degraded =
+                    (info?[PHImageResultIsDegradedKey] as? Bool)
+                    ?? false
+                let error =
+                    info?[PHImageErrorKey] as? Error
 
                 if cancelled || error != nil {
                     completed = true
-                    continuation.resume(returning: nil)
+                    continuation.resume(
+                        returning: nil
+                    )
                     return
                 }
 
                 guard !degraded else { return }
 
                 completed = true
-                continuation.resume(returning: image?.cgImage)
+                continuation.resume(
+                    returning: image?.cgImage
+                )
             }
         }
     }
@@ -419,16 +599,21 @@ final class VisionIndexStore: ObservableObject {
     ) async -> AnalysisPayload {
         await withCheckedContinuation { continuation in
             analysisQueue.async {
-                let faceRequest = VNDetectFaceRectanglesRequest()
+                let faceRequest =
+                    VNDetectFaceRectanglesRequest()
                 faceRequest.preferBackgroundProcessing = true
 
                 var requests: [VNRequest] = [faceRequest]
-                var classifyRequest: VNClassifyImageRequest?
-                var textRequest: VNRecognizeTextRequest?
+                var classifyRequest:
+                    VNClassifyImageRequest?
+                var textRequest:
+                    VNRecognizeTextRequest?
 
                 if includeSearch {
-                    let classify = VNClassifyImageRequest()
-                    classify.preferBackgroundProcessing = true
+                    let classify =
+                        VNClassifyImageRequest()
+                    classify.preferBackgroundProcessing =
+                        true
                     classifyRequest = classify
                     requests.append(classify)
 
@@ -448,7 +633,8 @@ final class VisionIndexStore: ObservableObject {
                 } catch {
                     continuation.resume(
                         returning: AnalysisPayload(
-                            searchRecord: includeSearch
+                            searchRecord:
+                                includeSearch
                                 ? SmartSearchRecord(
                                     assetID: assetID,
                                     labels: [],
@@ -462,28 +648,45 @@ final class VisionIndexStore: ObservableObject {
                     return
                 }
 
-                let faceObservations = (faceRequest.results ?? [])
+                let faceObservations =
+                    (faceRequest.results ?? [])
                     .filter {
-                        $0.boundingBox.width * $0.boundingBox.height >= 0.012
+                        $0.boundingBox.width *
+                        $0.boundingBox.height >= 0.012
                     }
                     .sorted {
-                        ($0.boundingBox.width * $0.boundingBox.height) >
-                        ($1.boundingBox.width * $1.boundingBox.height)
+                        (
+                            $0.boundingBox.width *
+                            $0.boundingBox.height
+                        ) >
+                        (
+                            $1.boundingBox.width *
+                            $1.boundingBox.height
+                        )
                     }
 
                 var detectedFaces: [DetectedFace] = []
 
-                for observation in faceObservations.prefix(self.maxFacesPerPhoto) {
-                    guard let crop = Self.cropFace(
-                        from: cgImage,
-                        normalizedBounds: observation.boundingBox
-                    ) else {
+                for observation in
+                    faceObservations.prefix(
+                        self.maxFacesPerPhoto
+                    ) {
+                    guard
+                        let crop = Self.cropFace(
+                            from: cgImage,
+                            normalizedBounds:
+                                observation.boundingBox
+                        )
+                    else {
                         continue
                     }
 
-                    let featureRequest = VNGenerateImageFeaturePrintRequest()
-                    featureRequest.imageCropAndScaleOption = .scaleFill
-                    featureRequest.preferBackgroundProcessing = true
+                    let featureRequest =
+                        VNGenerateImageFeaturePrintRequest()
+                    featureRequest.imageCropAndScaleOption =
+                        .scaleFill
+                    featureRequest.preferBackgroundProcessing =
+                        true
 
                     do {
                         try VNImageRequestHandler(
@@ -491,10 +694,13 @@ final class VisionIndexStore: ObservableObject {
                             options: [:]
                         ).perform([featureRequest])
 
-                        if let feature = featureRequest.results?.first {
+                        if let feature =
+                            featureRequest.results?.first {
                             detectedFaces.append(
                                 DetectedFace(
-                                    bounds: FaceBounds(observation.boundingBox),
+                                    bounds: FaceBounds(
+                                        observation.boundingBox
+                                    ),
                                     feature: feature
                                 )
                             )
@@ -504,29 +710,48 @@ final class VisionIndexStore: ObservableObject {
                     }
                 }
 
-                var searchRecord: SmartSearchRecord?
+                var searchRecord:
+                    SmartSearchRecord?
 
                 if includeSearch {
-                    let labels = (classifyRequest?.results ?? [])
-                        .filter { $0.confidence >= 0.08 }
+                    let labels =
+                        (classifyRequest?.results ?? [])
+                        .filter {
+                            $0.confidence >= 0.08
+                        }
                         .prefix(14)
                         .map {
                             $0.identifier
-                                .replacingOccurrences(of: "_", with: " ")
-                                .replacingOccurrences(of: "-", with: " ")
+                                .replacingOccurrences(
+                                    of: "_",
+                                    with: " "
+                                )
+                                .replacingOccurrences(
+                                    of: "-",
+                                    with: " "
+                                )
                                 .lowercased()
                         }
 
-                    let recognizedLines = (textRequest?.results ?? [])
-                        .compactMap { $0.topCandidates(1).first?.string }
+                    let recognizedLines =
+                        (textRequest?.results ?? [])
+                        .compactMap {
+                            $0.topCandidates(1)
+                                .first?
+                                .string
+                        }
                         .prefix(24)
 
-                    searchRecord = SmartSearchRecord(
-                        assetID: assetID,
-                        labels: Array(labels),
-                        recognizedText: recognizedLines.joined(separator: " "),
-                        faceCount: faceObservations.count
-                    )
+                    searchRecord =
+                        SmartSearchRecord(
+                            assetID: assetID,
+                            labels: Array(labels),
+                            recognizedText:
+                                recognizedLines
+                                .joined(separator: " "),
+                            faceCount:
+                                faceObservations.count
+                        )
                 }
 
                 continuation.resume(
@@ -535,6 +760,35 @@ final class VisionIndexStore: ObservableObject {
                         faces: detectedFaces
                     )
                 )
+            }
+        }
+    }
+
+    private func featurePrint(
+        for image: CGImage
+    ) async -> VNFeaturePrintObservation? {
+        await withCheckedContinuation { continuation in
+            analysisQueue.async {
+                let request =
+                    VNGenerateImageFeaturePrintRequest()
+                request.imageCropAndScaleOption = .scaleFill
+                request.preferBackgroundProcessing = true
+
+                do {
+                    try VNImageRequestHandler(
+                        cgImage: image,
+                        options: [:]
+                    ).perform([request])
+
+                    continuation.resume(
+                        returning:
+                            request.results?.first
+                    )
+                } catch {
+                    continuation.resume(
+                        returning: nil
+                    )
+                }
             }
         }
     }
@@ -549,22 +803,42 @@ final class VisionIndexStore: ObservableObject {
         var rect = CGRect(
             x: normalizedBounds.minX * width,
             y: (1 - normalizedBounds.maxY) * height,
-            width: normalizedBounds.width * width,
-            height: normalizedBounds.height * height
+            width:
+                normalizedBounds.width * width,
+            height:
+                normalizedBounds.height * height
         )
 
         let paddingX = rect.width * 0.16
         let paddingY = rect.height * 0.20
-        rect = rect.insetBy(dx: -paddingX, dy: -paddingY)
 
-        let imageRect = CGRect(x: 0, y: 0, width: width, height: height)
-        rect = rect.intersection(imageRect).integral
+        rect = rect.insetBy(
+            dx: -paddingX,
+            dy: -paddingY
+        )
 
-        guard rect.width >= 40, rect.height >= 40 else { return nil }
+        let imageRect = CGRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: height
+        )
+
+        rect = rect
+            .intersection(imageRect)
+            .integral
+
+        guard
+            rect.width >= 40,
+            rect.height >= 40
+        else {
+            return nil
+        }
+
         return image.cropping(to: rect)
     }
 
-    private var indexURL: URL? {
+    private var storageFolderURL: URL? {
         do {
             let base = try FileManager.default.url(
                 for: .applicationSupportDirectory,
@@ -578,31 +852,61 @@ final class VisionIndexStore: ObservableObject {
                 isDirectory: true
             )
 
-            if !FileManager.default.fileExists(atPath: folder.path) {
-                try FileManager.default.createDirectory(
-                    at: folder,
-                    withIntermediateDirectories: true
-                )
+            if !FileManager.default.fileExists(
+                atPath: folder.path
+            ) {
+                try FileManager.default
+                    .createDirectory(
+                        at: folder,
+                        withIntermediateDirectories: true
+                    )
             }
 
-            return folder.appendingPathComponent("search-index-v1.json")
+            return folder
         } catch {
             return nil
         }
     }
 
+    private var indexURL: URL? {
+        storageFolderURL?
+            .appendingPathComponent(
+                "search-index-v1.json"
+            )
+    }
+
+    private var peopleURL: URL? {
+        storageFolderURL?
+            .appendingPathComponent(
+                "people-index-v1.json"
+            )
+    }
+
+    private var stateURL: URL? {
+        storageFolderURL?
+            .appendingPathComponent(
+                "index-state-v1.json"
+            )
+    }
+
     private func loadRecords() {
-        guard let url = indexURL,
-              let data = try? Data(contentsOf: url),
-              let decoded = try? JSONDecoder().decode(
-                [SmartSearchRecord].self,
-                from: data
-              ) else {
+        guard
+            let url = indexURL,
+            let data = try? Data(contentsOf: url),
+            let decoded = try? JSONDecoder()
+                .decode(
+                    [SmartSearchRecord].self,
+                    from: data
+                )
+        else {
             return
         }
 
         records = Dictionary(
-            uniqueKeysWithValues: decoded.map { ($0.assetID, $0) }
+            uniqueKeysWithValues:
+                decoded.map {
+                    ($0.assetID, $0)
+                }
         )
     }
 
@@ -610,15 +914,103 @@ final class VisionIndexStore: ObservableObject {
         guard let url = indexURL else { return }
 
         let values = Array(records.values)
-        guard let data = try? JSONEncoder().encode(values) else { return }
 
-        try? data.write(to: url, options: .atomic)
+        guard
+            let data = try? JSONEncoder()
+                .encode(values)
+        else {
+            return
+        }
+
+        try? data.write(
+            to: url,
+            options: .atomic
+        )
+    }
+
+    private func loadPeople() {
+        guard
+            let url = peopleURL,
+            let data = try? Data(contentsOf: url),
+            let decoded = try? JSONDecoder()
+                .decode(
+                    [PersonCluster].self,
+                    from: data
+                )
+        else {
+            return
+        }
+
+        storedClusters = decoded
+        people = decoded
+            .filter { $0.count >= 2 }
+            .sorted { $0.count > $1.count }
+    }
+
+    private func savePeople() {
+        guard let url = peopleURL else { return }
+
+        guard
+            let data = try? JSONEncoder()
+                .encode(storedClusters)
+        else {
+            return
+        }
+
+        try? data.write(
+            to: url,
+            options: .atomic
+        )
+    }
+
+    private func loadIndexState() {
+        guard
+            let url = stateURL,
+            let data = try? Data(contentsOf: url),
+            let decoded = try? JSONDecoder()
+                .decode(
+                    PersistedIndexState.self,
+                    from: data
+                )
+        else {
+            return
+        }
+
+        knownAssetIDs = Set(decoded.knownAssetIDs)
+        seededInitialLibrary =
+            decoded.seededInitialLibrary
+    }
+
+    private func saveIndexState() {
+        guard let url = stateURL else { return }
+
+        let state = PersistedIndexState(
+            knownAssetIDs:
+                Array(knownAssetIDs),
+            seededInitialLibrary:
+                seededInitialLibrary
+        )
+
+        guard
+            let data = try? JSONEncoder()
+                .encode(state)
+        else {
+            return
+        }
+
+        try? data.write(
+            to: url,
+            options: .atomic
+        )
     }
 
     private func loadPersonNames() {
-        guard let stored = UserDefaults.standard.dictionary(
-            forKey: personNamesKey
-        ) as? [String: String] else {
+        guard
+            let stored = UserDefaults.standard
+                .dictionary(
+                    forKey: personNamesKey
+                ) as? [String: String]
+        else {
             return
         }
 
@@ -640,6 +1032,6 @@ private struct WorkingPerson {
     let id: String
     let representativeAssetID: String
     let representativeFaceBounds: FaceBounds
-    let representativeFeature: VNFeaturePrintObservation
+    var representativeFeature: VNFeaturePrintObservation?
     var assetIDs: Set<String>
 }
