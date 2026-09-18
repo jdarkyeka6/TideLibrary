@@ -1183,10 +1183,22 @@ final class VisionIndexStore: ObservableObject {
             )
         }
 
-        let left =
+        let firstEye =
             sourcePoint(leftLocal)
-        let right =
+        let secondEye =
             sourcePoint(rightLocal)
+
+        // Use screen-side ordering instead of semantic left/right eye labels.
+        // That prevents subject-relative landmark naming from flipping alignment.
+        let left =
+            firstEye.x <= secondEye.x
+            ? firstEye
+            : secondEye
+
+        let right =
+            firstEye.x <= secondEye.x
+            ? secondEye
+            : firstEye
 
         let dx =
             right.x - left.x
