@@ -64,5 +64,10 @@ struct PersonCluster: Identifiable, Codable, Hashable {
     let representativeFaceBounds: FaceBounds
     let assetIDs: [String]
 
+    // FaceNet v2 fields. Optional so old v1 files can still decode for migration.
+    let centroidEmbedding: [Float]?
+    let embeddingSampleCount: Int?
+    let representativeQuality: Float?
+
     var count: Int { assetIDs.count }
 }
