@@ -56,18 +56,71 @@ platform :ios do
       lock_when_sleeps: false
     )
 
-    cert(
+    cert_args = {
       api_key: api_key,
       generate_apple_certs: true,
       keychain_path: File.expand_path("~/Library/Keychains/#{keychain_name}-db"),
       keychain_password: keychain_pw
-    )
+    }
 
-    sigh(
-      api_key: api_key,
-      app_identifier: APP_IDENTIFIER,
-      force: true
-    )
+    begin
+      cert(**cert_args)
+    rescue => e
+      msg = e.message.to_s.downcase
+      unless msg.include?("maximum number") && msg.include?("distribution certificate")
+        raise
+      end
+
+      require "time"
+      allowed_types = [
+        Spaceship::ConnectAPI::Certificate::CertificateType::DISTRIBUTION,
+        Spaceship::ConnectAPI::Certificate::CertificateType::IOS_DISTRIBUTION
+      ]
+
+      distribution_certs = Spaceship::ConnectAPI::Certificate.all.select do |candidate|
+        allowed_types.include?(candidate.certificate_type)
+      end
+
+      UI.user_error!("Apple reported the Distribution certificate limit, but no distribution certificates were returned for revocation.") if distribution_certs.empty?
+
+      oldest = distribution_certs.min_by do |candidate|
+        begin
+          Time.parse(candidate.expiration_date.to_s)
+        rescue StandardError
+          Time.at(0)
+        end
+      end
+
+      UI.important("Distribution certificate limit reached. Revoking oldest distribution certificate, then retrying.")
+      oldest.delete!
+      sleep 3
+      cert(**cert_args)
+    end
+
+    profile_attempt = 0
+    begin
+      profile_attempt += 1
+      sigh(
+        api_key: api_key,
+        app_identifier: APP_IDENTIFIER,
+        force: true
+      )
+    rescue => e
+      message = e.message.to_s.downcase
+      transient_apple_error =
+        message.include?("server error got 500") ||
+        message.include?("internal server error") ||
+        message.include?("status code: 500")
+
+      if transient_apple_error && profile_attempt < 5
+        delay = profile_attempt * 10
+        UI.important("Apple's provisioning-profile service returned a temporary 500. Retrying in #{delay}s (attempt #{profile_attempt + 1}/5).")
+        sleep delay
+        retry
+      end
+
+      raise
+    end
 
     profile_name = lane_context[SharedValues::SIGH_NAME]
 
