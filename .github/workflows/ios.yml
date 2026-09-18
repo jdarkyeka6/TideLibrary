@@ -1,0 +1,48 @@
+name: iOS Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Apple toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+
+      - name: Generate TideLibrary app icon
+        run: python3 ios-ci/generate_app_icon.py
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Compile TideLibrary for iOS Simulator
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project TideLibrary.xcodeproj \
+            -scheme TideLibrary \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            build | tee xcodebuild.log
+
+      - name: Upload compiler log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tidelibrary-xcodebuild-log
+          path: xcodebuild.log
+          if-no-files-found: ignore
