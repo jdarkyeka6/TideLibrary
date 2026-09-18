@@ -930,8 +930,7 @@ final class VisionIndexStore: ObservableObject {
 
                         let quality =
                             observation
-                            .faceCaptureQuality?
-                            .floatValue ??
+                            .faceCaptureQuality ??
                             0
 
                         return
@@ -941,11 +940,9 @@ final class VisionIndexStore: ObservableObject {
                     }
                     .sorted {
                         let q0 =
-                            $0.faceCaptureQuality?
-                            .floatValue ?? 0
+                            $0.faceCaptureQuality ?? 0
                         let q1 =
-                            $1.faceCaptureQuality?
-                            .floatValue ?? 0
+                            $1.faceCaptureQuality ?? 0
 
                         return q0 > q1
                     }
@@ -1001,8 +998,7 @@ final class VisionIndexStore: ObservableObject {
 
                     let quality =
                         limitedFaces[index]
-                        .faceCaptureQuality?
-                        .floatValue ??
+                        .faceCaptureQuality ??
                         0
 
                     guard
