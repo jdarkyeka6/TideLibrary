@@ -1,0 +1,112 @@
+APP_IDENTIFIER = "com.jdarkyeka6.TideLibrary"
+APP_NAME = "TideLibrary"
+
+default_platform(:ios)
+
+platform :ios do
+  desc "Build TideLibrary and upload it to TestFlight"
+  lane :beta do
+    key_id    = ENV["ASC_KEY_ID"].to_s.strip
+    issuer_id = ENV["ASC_ISSUER_ID"].to_s.strip
+    team_id   = ENV["APPLE_TEAM_ID"].to_s.strip
+
+    missing = []
+    missing << "ASC_KEY_ID" if key_id.empty?
+    missing << "ASC_ISSUER_ID" if issuer_id.empty?
+    missing << "APPLE_TEAM_ID" if team_id.empty?
+    missing << "ASC_KEY_CONTENT" if ENV["ASC_KEY_CONTENT"].to_s.strip.empty?
+    UI.user_error!("Missing Apple CI secret(s): #{missing.join(', ')}") unless missing.empty?
+
+    raw = ENV["ASC_KEY_CONTENT"].to_s.strip
+    key_text = if raw.include?("BEGIN PRIVATE KEY")
+      raw
+    else
+      require "base64"
+      Base64.decode64(raw)
+    end
+
+    UI.user_error!("ASC_KEY_CONTENT is not a valid .p8 private key") unless key_text.include?("BEGIN PRIVATE KEY")
+
+    key_path = File.expand_path("~/tidelibrary_asc_api_key.p8")
+    File.write(key_path, key_text)
+
+    api_key = app_store_connect_api_key(
+      key_id: key_id,
+      issuer_id: issuer_id,
+      key_filepath: key_path
+    )
+
+    require "spaceship"
+
+    app = Spaceship::ConnectAPI::App.find(APP_IDENTIFIER)
+    unless app
+      UI.user_error!(
+        "APP_STORE_RECORD_MISSING: Create an iOS app named '#{APP_NAME}' in App Store Connect using bundle ID '#{APP_IDENTIFIER}'."
+      )
+    end
+
+    keychain_name = "tidelibrary-ci.keychain"
+    keychain_pw = "tidelibrary-ci-temp"
+    create_keychain(
+      name: keychain_name,
+      password: keychain_pw,
+      default_keychain: true,
+      unlock: true,
+      timeout: 3600,
+      lock_when_sleeps: false
+    )
+
+    cert(
+      api_key: api_key,
+      generate_apple_certs: true,
+      keychain_path: File.expand_path("~/Library/Keychains/#{keychain_name}-db"),
+      keychain_password: keychain_pw
+    )
+
+    sigh(
+      api_key: api_key,
+      app_identifier: APP_IDENTIFIER,
+      force: true
+    )
+
+    profile_name = lane_context[SharedValues::SIGH_NAME]
+
+    update_code_signing_settings(
+      path: "TideLibrary.xcodeproj",
+      use_automatic_signing: false,
+      team_id: team_id,
+      code_sign_identity: "Apple Distribution",
+      profile_name: profile_name,
+      targets: ["TideLibrary"]
+    )
+
+    latest = latest_testflight_build_number(
+      api_key: api_key,
+      app_identifier: APP_IDENTIFIER,
+      initial_build_number: 0
+    )
+
+    increment_build_number(
+      xcodeproj: "TideLibrary.xcodeproj",
+      build_number: latest + 1
+    )
+
+    build_app(
+      project: "TideLibrary.xcodeproj",
+      scheme: "TideLibrary",
+      export_method: "app-store",
+      export_options: {
+        signingStyle: "manual",
+        teamID: team_id,
+        provisioningProfiles: {
+          APP_IDENTIFIER => profile_name
+        }
+      }
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      skip_waiting_for_build_processing: true
+    )
+  end
+end
