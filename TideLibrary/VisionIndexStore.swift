@@ -147,7 +147,7 @@ final class VisionIndexStore: ObservableObject {
         return library.filter { ids.contains($0.id) }
     }
 
-    private static func filterAssets(
+    nonisolated private static func filterAssets(
         _ assets: [PhotoAssetRef],
         query: String,
         records: [String: SmartSearchRecord],
