@@ -36,10 +36,12 @@ final class VisionIndexStore: ObservableObject {
     }
 
     func startIndexing(assets: [PhotoAssetRef]) {
-        let imageAssets = assets.filter { !$0.isVideo }
-        guard !imageAssets.isEmpty else { return }
+        guard !assets.isEmpty else { return }
 
-        let targetAssets = Array(imageAssets.prefix(maxAssetsPerSession))
+        // Photos can vend preview thumbnails for both image and video assets.
+        // Indexing the video preview lets layered searches such as
+        // "vids oct Jake" include videos whose poster frame contains Jake.
+        let targetAssets = Array(assets.prefix(maxAssetsPerSession))
         let signature = "\(targetAssets.first?.id ?? "none"):\(targetAssets.count)"
 
         guard !isIndexing, activeLibrarySignature != signature else { return }
