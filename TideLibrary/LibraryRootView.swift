@@ -143,10 +143,10 @@ private struct PhotosScreen: View {
                 guard let selectedPhotoID else { return nil }
                 return PhotoSelection(id: selectedPhotoID)
             },
-            set: { value in
+            set: { value, _ in
                 selectedPhotoID = value?.id
             }
-        )) { selection in
+        )) { (selection: PhotoSelection) in
             PhotoGalleryViewer(
                 assets: filteredPhotos,
                 initialID: selection.id
@@ -347,8 +347,8 @@ private struct AlbumDetailView: View {
                 guard let selectedID else { return nil }
                 return PhotoSelection(id: selectedID)
             },
-            set: { selectedID = $0?.id }
-        )) { selection in
+            set: { value, _ in selectedID = value?.id }
+        )) { (selection: PhotoSelection) in
             PhotoGalleryViewer(assets: albumAssets, initialID: selection.id)
         }
     }
