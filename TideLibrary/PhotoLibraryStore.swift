@@ -2,18 +2,24 @@ import Foundation
 import Photos
 
 @MainActor
-final class PhotoLibraryStore: ObservableObject {
+final class PhotoLibraryStore: NSObject, ObservableObject, PHPhotoLibraryChangeObserver {
     @Published private(set) var assets: [PhotoAssetRef] = []
-    @Published private(set) var albums: [PhotoAlbumRef] = []
     @Published private(set) var authorizationStatus: PHAuthorizationStatus
     @Published var isLoading = false
     @Published var errorMessage: String?
 
-    init() {
+    override init() {
         authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        super.init()
+        PHPhotoLibrary.shared().register(self)
+
         if canRead {
             reload()
         }
+    }
+
+    deinit {
+        PHPhotoLibrary.shared().unregisterChangeObserver(self)
     }
 
     var canRead: Bool {
@@ -30,6 +36,7 @@ final class PhotoLibraryStore: ObservableObject {
 
     func requestAccessIfNeeded() async {
         let current = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+
         if current == .notDetermined {
             authorizationStatus = await withCheckedContinuation { continuation in
                 PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
@@ -48,7 +55,6 @@ final class PhotoLibraryStore: ObservableObject {
     func reload() {
         guard canRead else {
             assets = []
-            albums = []
             return
         }
 
@@ -67,75 +73,13 @@ final class PhotoLibraryStore: ObservableObject {
         }
 
         assets = nextAssets
-        albums = loadAlbums()
         isLoading = false
     }
 
-    func assets(in album: PhotoAlbumRef) -> [PhotoAssetRef] {
-        guard let collection = PHAssetCollection.fetchAssetCollections(
-            withLocalIdentifiers: [album.id],
-            options: nil
-        ).firstObject else {
-            return []
-        }
-
-        let options = PHFetchOptions()
-        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-        let result = PHAsset.fetchAssets(in: collection, options: options)
-
-        var values: [PhotoAssetRef] = []
-        values.reserveCapacity(result.count)
-        result.enumerateObjects { asset, _, _ in
-            guard asset.mediaType == .image || asset.mediaType == .video else { return }
-            values.append(Self.makeAssetRef(asset))
-        }
-        return values
-    }
-
-    private func loadAlbums() -> [PhotoAlbumRef] {
-        var result: [PhotoAlbumRef] = []
-        var seen = Set<String>()
-
-        func appendCollections(_ collections: PHFetchResult<PHAssetCollection>) {
-            collections.enumerateObjects { collection, _, _ in
-                guard !seen.contains(collection.localIdentifier) else { return }
-
-                let fetch = PHAsset.fetchAssets(in: collection, options: nil)
-                guard fetch.count > 0 else { return }
-
-                let cover = fetch.lastObject?.localIdentifier
-                result.append(
-                    PhotoAlbumRef(
-                        id: collection.localIdentifier,
-                        title: collection.localizedTitle ?? "Album",
-                        count: fetch.count,
-                        coverAssetID: cover
-                    )
-                )
-                seen.insert(collection.localIdentifier)
-            }
-        }
-
-        appendCollections(
-            PHAssetCollection.fetchAssetCollections(
-                with: .smartAlbum,
-                subtype: .any,
-                options: nil
-            )
-        )
-
-        appendCollections(
-            PHAssetCollection.fetchAssetCollections(
-                with: .album,
-                subtype: .any,
-                options: nil
-            )
-        )
-
-        return result.sorted {
-            if $0.title == "Recents" { return true }
-            if $1.title == "Recents" { return false }
-            return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+    nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
+        Task { @MainActor [weak self] in
+            self?.authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+            self?.reload()
         }
     }
 
@@ -147,7 +91,9 @@ final class PhotoLibraryStore: ObservableObject {
             pixelWidth: asset.pixelWidth,
             pixelHeight: asset.pixelHeight,
             duration: asset.duration,
-            isFavorite: asset.isFavorite
+            isFavorite: asset.isFavorite,
+            isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
+            isLivePhoto: asset.mediaSubtypes.contains(.photoLive)
         )
     }
 }
