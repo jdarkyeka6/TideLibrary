@@ -1,7 +1,4 @@
-import AVKit
 import Photos
-import QuickLook
-import QuickLookThumbnailing
 import SwiftUI
 
 private let tidePhotoImageManager = PHCachingImageManager()
@@ -21,28 +18,31 @@ struct ApplePhotoThumbnail: View {
                     .resizable()
                     .scaledToFill()
             } else {
-                Image(systemName: "icloud")
+                Image(systemName: "photo")
                     .foregroundStyle(.secondary)
             }
 
-            if asset.isVideo {
-                mediaBadge(symbol: "play.fill")
-            } else if asset.isFavorite {
-                mediaBadge(symbol: "heart.fill")
+            HStack(spacing: 4) {
+                if asset.isLivePhoto {
+                    Image(systemName: "livephoto")
+                }
+                if asset.isVideo {
+                    Image(systemName: "play.fill")
+                }
+                if asset.isFavorite {
+                    Image(systemName: "heart.fill")
+                }
             }
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(.white)
+            .padding(6)
+            .background(.black.opacity(0.45), in: Capsule())
+            .padding(6)
+            .opacity((asset.isLivePhoto || asset.isVideo || asset.isFavorite) ? 1 : 0)
         }
         .clipped()
         .onAppear(perform: load)
         .onDisappear(perform: cancel)
-    }
-
-    private func mediaBadge(symbol: String) -> some View {
-        Image(systemName: symbol)
-            .font(.system(size: 10, weight: .bold))
-            .foregroundStyle(.white)
-            .padding(6)
-            .background(.black.opacity(0.55), in: Circle())
-            .padding(6)
     }
 
     private func load() {
@@ -60,7 +60,7 @@ struct ApplePhotoThumbnail: View {
         let scale = UIScreen.main.scale
         requestID = tidePhotoImageManager.requestImage(
             for: phAsset,
-            targetSize: CGSize(width: 180 * scale, height: 180 * scale),
+            targetSize: CGSize(width: 190 * scale, height: 190 * scale),
             contentMode: .aspectFill,
             options: options
         ) { value, _ in
@@ -78,86 +78,94 @@ struct ApplePhotoThumbnail: View {
     }
 }
 
-struct CloudThumbnail: View {
-    let asset: CloudAssetRef
+struct FaceThumbnail: View {
+    let assetID: String
+    let bounds: FaceBounds
+
     @State private var image: UIImage?
+    @State private var requestID: PHImageRequestID = PHInvalidImageRequestID
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Rectangle()
-                .fill(.white.opacity(0.06))
+        ZStack {
+            Circle()
+                .fill(.white.opacity(0.07))
 
             if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                VStack(spacing: 5) {
-                    Image(systemName: "externaldrive")
-                    Text("DRIVE")
-                        .font(.system(size: 8, weight: .bold))
+                GeometryReader { proxy in
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .clipped()
                 }
-                .foregroundStyle(.secondary)
-            }
-
-            if asset.isVideo {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(6)
-                    .background(.black.opacity(0.55), in: Circle())
-                    .padding(6)
+            } else {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 42))
+                    .foregroundStyle(.secondary)
             }
         }
-        .clipped()
-        .task(id: asset.id) {
-            guard image == nil else { return }
-            let request = QLThumbnailGenerator.Request(
-                fileAt: asset.url,
-                size: CGSize(width: 360, height: 360),
-                scale: UIScreen.main.scale,
-                representationTypes: .thumbnail
-            )
+        .clipShape(Circle())
+        .onAppear(perform: load)
+        .onDisappear(perform: cancel)
+    }
 
-            do {
-                let thumbnail = try await QLThumbnailGenerator.shared.generateBestRepresentation(for: request)
-                image = thumbnail.uiImage
-            } catch {
-                image = nil
+    private func load() {
+        guard image == nil,
+              let asset = PHAsset.fetchAssets(
+                withLocalIdentifiers: [assetID],
+                options: nil
+              ).firstObject else { return }
+
+        let options = PHImageRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = true
+
+        requestID = PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: CGSize(width: 420, height: 420),
+            contentMode: .aspectFit,
+            options: options
+        ) { value, info in
+            guard let value else { return }
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            guard !degraded else { return }
+
+            DispatchQueue.main.async {
+                self.image = Self.crop(value, normalizedBounds: bounds.cgRect)
             }
         }
     }
-}
 
-struct QuickLookView: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(url: url)
+    private func cancel() {
+        guard requestID != PHInvalidImageRequestID else { return }
+        PHImageManager.default().cancelImageRequest(requestID)
+        requestID = PHInvalidImageRequestID
     }
 
-    func makeUIViewController(context: Context) -> QLPreviewController {
-        let controller = QLPreviewController()
-        controller.dataSource = context.coordinator
-        return controller
-    }
+    private static func crop(
+        _ image: UIImage,
+        normalizedBounds: CGRect
+    ) -> UIImage {
+        guard let cgImage = image.cgImage else { return image }
 
-    func updateUIViewController(_ uiViewController: QLPreviewController, context: Context) {}
+        let width = CGFloat(cgImage.width)
+        let height = CGFloat(cgImage.height)
 
-    final class Coordinator: NSObject, QLPreviewControllerDataSource {
-        let url: URL
+        var rect = CGRect(
+            x: normalizedBounds.minX * width,
+            y: (1 - normalizedBounds.maxY) * height,
+            width: normalizedBounds.width * width,
+            height: normalizedBounds.height * height
+        )
 
-        init(url: URL) {
-            self.url = url
-        }
+        let padding = max(rect.width, rect.height) * 0.35
+        rect = rect.insetBy(dx: -padding, dy: -padding)
 
-        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+        let imageRect = CGRect(x: 0, y: 0, width: width, height: height)
+        rect = rect.intersection(imageRect).integral
 
-        func previewController(
-            _ controller: QLPreviewController,
-            previewItemAt index: Int
-        ) -> QLPreviewItem {
-            url as NSURL
-        }
+        guard let cropped = cgImage.cropping(to: rect) else { return image }
+        return UIImage(cgImage: cropped)
     }
 }
