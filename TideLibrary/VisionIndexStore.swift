@@ -914,8 +914,11 @@ final class VisionIndexStore: ObservableObject {
                     return
                 }
 
+                let qualityResults =
+                    qualityRequest.results.flatMap { $0 } ?? []
+
                 let qualityFaces =
-                    (qualityRequest.results ?? [])
+                    qualityResults
                     .filter { observation in
                         let area =
                             observation
@@ -974,8 +977,7 @@ final class VisionIndexStore: ObservableObject {
                             [landmarks]
                         )
                         landmarkFaces =
-                            landmarks.results ??
-                            []
+                            landmarks.results.flatMap { $0 } ?? []
                     } catch {
                         landmarkFaces =
                             limitedFaces
