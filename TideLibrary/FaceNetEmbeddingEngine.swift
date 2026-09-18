@@ -6,9 +6,16 @@ final class FaceNetEmbeddingEngine {
     static let inputSide = 160
     static let embeddingSize = 512
 
-    private let model = Facenet6()
+    private let model: Facenet6?
+
+    init() {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .all
+        model = try? Facenet6(configuration: configuration)
+    }
 
     func embedding(for image: CGImage) -> [Float]? {
+        guard let model else { return nil }
         guard let pixels = rgbPixels(image) else { return nil }
 
         let count = pixels.count
